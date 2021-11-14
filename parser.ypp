@@ -1,0 +1,1249 @@
+%{
+		#include "hw3_output.hpp"
+		#include "utility.hpp"
+		int yylex();
+		void yyerror(const char*);
+		extern int yylineno;
+		#include <string>
+        #include <list>
+        #include <vector>
+        #include <map>
+        #include <stack>
+		
+		
+        using std::string;
+        using std::list;
+        using std::vector;
+        using std::map;
+        using std::stack;
+        using std::pair;
+
+		vector<map<string,Symbol*>*> symbol_vector;
+        map<string,Function*> functions;
+        stack<int> offset_stack;
+        stack<vector<Symbol*>*> symbol_stack;
+        string latest_function = "";
+        int in_while = 0;
+        int in_switch = 0;
+		string sp;
+		CodeBuffer& Buffer = CodeBuffer::instance();
+
+	
+%}
+
+%token ID NUM STRING
+%token VOID INT BYTE B BOOL TRUE FALSE RETURN WHILE 
+%token BREAK CONTINUE SWITCH CASE DEFAULT COLON SC COMMA IF
+%right ASSIGN
+%left OR
+%left AND
+%left EQUAL NEQUAL
+%nonassoc LESS GREATER LESSEQ GREATEREQ
+%left PLUS MINUS
+%left MULT DIVIDE
+%right NOT
+%left LPAREN RPAREN LBRACE RBRACE 
+%nonassoc ELSE
+
+
+%%
+
+
+Program:		Funcs {}
+			
+Funcs:			/*epsilon*/ {}
+				| FuncDecl Funcs {}
+FuncDecl:		RetType ID LPAREN Formals RPAREN LBRACE
+					{
+					latest_function = $1->getType();
+
+					if(symbol_vector[0]->find($2->getName()) != symbol_vector[0]->end()) {
+						 output::errorDef(yylineno,$2->getName());
+						 exit(1);
+					}
+
+					vector<string>* argTypes = new vector<string>(); //see if it fits
+
+					for (std::list<parameter>::iterator it=$4->getParList()->begin(); it != $4->getParList()->end(); ++it) {
+						argTypes->push_back(it->getType());
+
+					}
+
+					string func_type = output::makeFunctionType($1->getType(),*argTypes);
+
+					Symbol* new_symbol = new Symbol($2->getName(),func_type,FUNCTION_OFFSET);
+					(*symbol_vector[0])[$2->getName()] = new_symbol;
+					symbol_stack.top()->push_back(new_symbol);
+					// inserts to Functions map
+					Function* new_func = new Function($2->getName(),$1->getType(),*argTypes);
+					functions[$2->getName()] = new_func;
+					map<string,Symbol*>* new_symbol_table = new map<string,Symbol*>(); // see if it fits
+					vector<Symbol*>* symbol_scope = new vector<Symbol*>();
+					int i =-1;
+                    symbol_vector.push_back(new_symbol_table);
+					for (std::list<parameter>::iterator it=$4->getParList()->begin(); it != $4->getParList()->end(); ++it,i--) {
+                        if(IDDefined(symbol_vector,it->getName()))
+                        {
+                            output::errorDef(yylineno,it->getName());
+                            exit(1);
+                        }
+						Symbol* new_symbol = new Symbol(it->getName(),it->getType(),i);
+						(*symbol_vector[symbol_vector.size()-1])[it->getName()] = new_symbol;
+						symbol_scope->push_back(new_symbol);
+					}
+					symbol_stack.push(symbol_scope); // The problem is that "Symbol stack" is a vector for Symbols, not for vectors
+					offset_stack.push(offset_stack.top());
+					
+					// code:
+					string code = "define ";
+					if ($1->getType() == "VOID") {
+						code += "void";
+					}
+					else {
+						code+= "i32";
+					}
+					code+= " @" + $2->getName() + "(";
+					for( int i = 0; i<$4->getParList()->size(); i++) {
+						code+= "i32";
+						if( i != $4->getParList()->size() - 1) {
+							code += ", ";
+						}
+					}
+					code+= ") {";
+					Buffer.emit(code);
+					
+					sp =  genReg();
+					Buffer.emit(sp + " = alloca [50 x i32]");
+                    }
+				Statements L RBRACE CLOSE_SCOPE
+					{
+							string code = "ret ";
+							if ($1->getType() == "VOID") {
+								code+= "void";
+							}
+							else {
+								code+= "i32 0";
+							}            
+							Buffer.bpatch($8->getNextList(),$9->getLabel());
+							Buffer.emit(code);
+							Buffer.emit("}\n"); 
+							
+					}
+					
+RetType:		Type {
+                        $$ = (Node*)new retType($1->getType());
+                     }
+				| VOID {
+				           $$ = (Node*)new retType("VOID");
+				       }
+Formals:		/*epsilon*/ 
+					{
+					    $$ = (Node*) new Formals();
+					}
+				| FormalsList 
+					{
+					    $$ = (Node*) new Formals($1->getParList());
+					}
+FormalsList:	FormalDecl 
+					{
+					    $$ = new FormalsList();
+					    $$->getParList()->push_front(*$1->getPar());
+					}
+				| FormalDecl COMMA FormalsList 
+					{
+					    $$ = new FormalsList();
+					    $$->setParList($3->getParList());
+					    parameter* temp_p = new parameter(*$1->getPar());
+					    $$->getParList()->push_front(*temp_p);
+					}
+FormalDecl:		Type ID
+                    {
+                        $$ = (Node*) new FormalDecl($2->getName(),$1->getType());
+                    }
+Statements:		Statement
+				{	
+					$$ = (Node *) new Statements();
+					//Buffer.printNextList($1->getNextList());
+					vector<pair<int,BranchLabelIndex>>* temp_v = new vector<pair<int,BranchLabelIndex>>($1->getNextList());
+					$$->setNextList(*temp_v);
+					//Buffer.printNextList($$->getNextList());
+					$$->setBreakList($1->getBreakList());
+					$$->setConList($1->getConList());
+					
+				}
+				| Statements L Statement 
+				{
+					$$ = (Node *) new Statements();
+					Buffer.bpatch($1->getNextList(), $2->getLabel());
+					$$->setNextList($3->getNextList());
+					//Buffer.printNextList($$->getNextList());
+					$$->setBreakList(Buffer.merge( $1->getBreakList(), $3->getBreakList()));
+					$$->setConList(Buffer.merge( $1->getConList(), $3->getConList()));
+				}
+Statement:		LBRACE OPEN_SCOPE Statements RBRACE CLOSE_SCOPE 
+					{
+						$$ = (Node *) new Statement();
+						$$->setNextList($3->getNextList());
+						//Buffer.printNextList($$->getNextList());
+						$$->setBreakList($3->getBreakList());
+						$$->setConList($3->getConList());
+					}
+				| Type ID SC { 
+					if(IDDefined(symbol_vector,$2->getName())){
+						output::errorDef(yylineno,$2->getName());
+						exit(1);
+					}
+					insertSymbol(symbol_vector,offset_stack,symbol_stack,$2->getName(),$1->getType());
+					$$ = (Node *) new Statement();
+					string reg = genReg();
+					string code = reg;
+					code += " = getelementptr [50 x i32], [50 x i32]* ";
+					code += sp;
+					code += ", i32 0, i32 ";
+					Symbol* id = findSymbol(symbol_vector,$2->getName());
+					if (id == nullptr) {
+						std::cout << "error null" << std::endl;
+					}
+					code += to_string(id->getOffset());
+					int line_num;
+					Buffer.emit(code);
+					Buffer.emit( "store i32 0, i32* " + reg);
+					line_num = Buffer.emit("br label @");
+					$$->setNextList(Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST)));
+						 					
+				}
+				| Type ID ASSIGN Exp SC {
+                    if (IDDefined(symbol_vector,$2->getName())){
+                        output::errorDef(yylineno,$2->getName());
+                        exit(1);
+                    }
+                    if($1->getType() != $4->getType())
+                    {
+                        if($1->getType() != "INT" || $4->getType() != "BYTE"){
+                            output::errorMismatch(yylineno);
+                            exit(1);
+                        }
+                    }
+                    insertSymbol(symbol_vector,offset_stack,symbol_stack,$2->getName(),$1->getType());
+					$$ = (Node *) new Statement();
+					string reg = genReg();
+					string code = reg;
+					code += " = getelementptr [50 x i32], [50 x i32]* ";
+					code += sp;
+					code += ", i32 0, i32 ";
+					Symbol* id = findSymbol(symbol_vector,$2->getName());
+					code += to_string(id->getOffset());
+					int line_num;
+					if ($1->getType() != "BOOL") 
+					{
+						 Buffer.emit(code);
+						 Buffer.emit( "store i32 " + $4->getReg() + ", i32* " + reg);
+						 line_num = Buffer.emit("br label @");
+						 $$->setNextList(Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST)));
+						 
+					
+					}
+					else
+					{
+						string true_label = Buffer.genLabel();
+						Buffer.bpatch($4->getTrueList(),true_label);
+						Buffer.emit(code);
+						Buffer.emit( "store i32 1, i32* " + reg);
+						line_num = Buffer.emit("br label @");
+						vector<pair<int,BranchLabelIndex>> tempList = Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST));
+						
+						string false_label = Buffer.genLabel();
+						Buffer.bpatch($4->getFalseList(),false_label);
+						reg = genReg();
+						code = reg;
+						code += " = getelementptr [50 x i32], [50 x i32]* ";
+						code += sp;
+						code += ", i32 0, i32 ";
+						code += to_string(id->getOffset());
+						Buffer.emit(code);
+						Buffer.emit( "store i32 0, i32* " + reg);
+						line_num = Buffer.emit("br label @");
+						$$->setNextList(Buffer.merge(tempList,Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST))));
+					}
+				}
+				| ID ASSIGN Exp SC {
+				    if (!IDDefined(symbol_vector,$1->getName()))
+				    {
+                        output::errorUndef(yylineno,$1->getName());
+                        exit(1);
+                    }
+                    Symbol* temp_symbol = findSymbol(symbol_vector,$1->getName());
+                    if(temp_symbol->getType() != $3->getType())
+                    {
+                        if(temp_symbol->getType() != "INT" || $3->getType() != "BYTE"){
+                            output::errorMismatch(yylineno);
+                            exit(1);
+                        }
+                    }
+					$$ = (Node *) new Statement();
+					string reg = genReg();
+					string code = reg;
+					code += " = getelementptr [50 x i32], [50 x i32]* ";
+					code += sp + ", i32 0, i32 ";
+					code += to_string(temp_symbol->getOffset());
+					int line_num;
+					if ($3->getType() != "BOOL") 
+					{
+						 Buffer.emit(code);
+						 Buffer.emit( "store i32 " + $3->getReg() + ", i32* " + reg);
+						 line_num = Buffer.emit("br label @");
+						 $$->setNextList(Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST)));
+						 
+					
+					}
+					else
+					{
+						string true_label = Buffer.genLabel();
+						Buffer.bpatch($3->getTrueList(),true_label);
+						 Buffer.emit(code);
+						Buffer.emit( "store i32 1, i32* " + reg);
+						line_num = Buffer.emit("br label @");
+						vector<pair<int,BranchLabelIndex>> tempList = Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST));
+						
+						string false_label = Buffer.genLabel();
+						Buffer.bpatch($3->getFalseList(),false_label);
+						reg = genReg();
+						code = reg;
+						code += " = getelementptr [50 x i32], [50 x i32]* ";
+						code += sp;
+						code += ", i32 0, i32 ";
+						code += to_string(temp_symbol->getOffset());
+						Buffer.emit(code);
+						Buffer.emit( "store i32 0, i32* " + reg);
+						line_num = Buffer.emit("br label @");
+						$$->setNextList(Buffer.merge(tempList,Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST))));
+					}					
+				}
+				| Call SC
+				{
+				    $$ = (Node *) new Statement();
+				    int line_num = Buffer.emit("br label @");
+				    $$->setNextList(Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST)));
+				}
+				| RETURN SC {
+                    if(latest_function != "VOID")
+                    {
+                        output::errorMismatch(yylineno);
+                        exit(1);
+                    }
+					$$ = (Node *) new Statement();
+					Buffer.emit("ret void");
+				 }
+				| RETURN Exp SC {
+                    if(($2->getType() != latest_function) || (latest_function == "VOID"))
+                    {
+                        if(latest_function != "INT" || $2->getType() != "BYTE")
+                        {
+                            output::errorMismatch(yylineno);
+                            exit(1);
+                        }
+                    }
+					$$ = (Node *) new Statement();
+					if ($2->getType() != "BOOL")
+					{
+						Buffer.emit("ret i32 " + $2->getReg());
+					}
+					else 
+					{
+						string true_label = Buffer.genLabel();
+						Buffer.bpatch($2->getTrueList(), true_label);
+						Buffer.emit( "ret i32 1");
+						
+						string false_label = Buffer.genLabel();
+						Buffer.bpatch($2->getFalseList(), false_label);
+						Buffer.emit( "ret i32 0");
+					}
+				 }
+				| IF LPAREN IfExp RPAREN OPEN_SCOPE L Statement CLOSE_SCOPE
+				  {
+						$$ = (Node *) new Statement();
+						Buffer.bpatch($3->getTrueList(),$6->getLabel());
+						$$->setNextList(Buffer.merge($3->getFalseList(), $7->getNextList()));
+						$$->setBreakList($7->getBreakList());
+						$$->setConList($7->getConList());
+				  }
+				| IF LPAREN IfExp RPAREN OPEN_SCOPE L Statement CLOSE_SCOPE ELSE OPEN_SCOPE L Statement CLOSE_SCOPE
+				{
+					$$ = (Node *) new Statement();
+					Buffer.bpatch($3->getTrueList(),$6->getLabel());
+					Buffer.bpatch($3->getFalseList(),$11->getLabel());
+					$$->setNextList(Buffer.merge($7->getNextList(), $12->getNextList()));
+					//Buffer.printNextList($$->getNextList());
+					$$->setBreakList(Buffer.merge($7->getBreakList(), $12->getBreakList()));
+					$$->setConList(Buffer.merge($7->getConList(), $12->getConList()));
+
+				}
+				| WHILE LPAREN N L Exp RPAREN
+				  {
+                      if($5->getType() != "BOOL")
+                      {
+                         output::errorMismatch(yylineno);
+                         exit(1);
+                      }
+                      in_while++;
+                  }
+				  OPEN_SCOPE L Statement CLOSE_SCOPE
+				  {
+				      in_while--;
+					  
+					  $$ = (Node *) new Statement();
+					  Buffer.bpatch($10->getNextList(),$4->getLabel());
+					  Buffer.bpatch($5->getTrueList(),$9->getLabel());
+					  $$->setNextList(Buffer.merge($5->getFalseList(), $10->getBreakList()));
+					  Buffer.bpatch($3->getNextList(), $4->getLabel());
+					  Buffer.bpatch($10->getConList(),$4->getLabel());
+				  }
+				| BREAK SC {
+				      if((in_while == 0) && (in_switch == 0))
+				      {
+				          output::errorUnexpectedBreak(yylineno);
+				          exit(1);
+				      }
+					  $$ = (Node *) new Statement();
+					  int line_num = Buffer.emit(" br label @");
+					  $$->setBreakList(Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST)));
+				  }
+				| CONTINUE SC {
+				      if(in_while == 0)
+				      {
+				          output::errorUnexpectedContinue(yylineno);
+				          exit(1);
+				      }
+					  $$ = (Node *) new Statement();
+					  int line_num = Buffer.emit("br label @");
+					  $$->setConList(Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST)));
+				  }
+				| SWITCH LPAREN Exp N RPAREN LBRACE
+				  {
+                      if(($3->getType() != "INT") && ($3->getType() != "BYTE"))
+                      {
+                         output::errorMismatch(yylineno);
+                         exit(1);
+                      }
+                      in_switch++;
+					  
+					 
+                  }
+				OPEN_SCOPE CaseList RBRACE CLOSE_SCOPE {
+				      in_switch--;
+					  
+					  $$ = (Node *) new Statement();
+					  string start = Buffer.genLabel();
+					  Buffer.bpatch($4->getNextList(),start);
+					  int value;
+					  string label;
+					  string var = $3->getReg();
+					  string cmpReg;
+					  string code = "switch i32 " + var + ", label ";
+					  if ($9->getDefaultFlag() == true) {
+						$$->setNextList($9->getNextList());
+						code += "%";
+						code += $9->getDefaultLabel();
+						Buffer.emit(code);
+					  }
+					  else {
+					    code += "@";
+						int line_num = Buffer.emit(code);
+						$$->setNextList(Buffer.merge($9->getNextList(),Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST))));
+					  }
+					  Buffer.emit("[\n");
+					  while(!$9->getValueStack().empty()) {
+							value = $9->getValueStack().top();
+							label = $9->getLabelStack().top();
+							string code = "\ti32 ";
+							code += to_string(value);
+							code += ", label %";
+							code += label;
+							code += "\n";
+							Buffer.emit(code);
+							
+							$9->getValueStack().pop();
+							$9->getLabelStack().pop();
+					  }
+					  Buffer.emit("]\n");
+					  $$->setNextList(Buffer.merge( $$->getNextList(), $9->getBreakList()));
+					  $$->setConList($9->getConList());
+					  
+					  
+					  
+				  }
+Call:			ID LPAREN ExpList RPAREN
+                                        {
+                                            if (functions.find($1->getName()) == functions.end()) {
+												output::errorUndefFunc(yylineno, $1->getName());
+												exit(1);
+											}
+											Function* func = functions[$1->getName()];
+											if(func->getArgTypes().size() != $3->getTypes()->size())
+											{
+											    output::errorPrototypeMismatch(yylineno, func->getName(), func->getArgTypes());
+                                                exit(1);
+											}
+											for(unsigned int i=0; i<func->getArgTypes().size();i++)
+											{
+                                                if (func->getArgTypes()[i] != (*$3->getTypes())[i]) {
+                                                    if(func->getArgTypes()[i] != "INT" || (*$3->getTypes())[i] != "BYTE"){
+                                                        output::errorPrototypeMismatch(yylineno, func->getName(), func->getArgTypes());
+                                                        exit(1);
+                                                    }
+                                                }
+											}
+											$$ = (Node*) new Call(func->getRetType());
+											
+											string code = "";
+											string reg = "";
+											if (func->getRetType() != "VOID") {
+												reg = genReg();
+												code = reg + " = " + "call i32 ";
+												$$->setReg(reg);
+											}
+											else {
+												code += "call void ";
+											}
+											code += "@" + func->getName() + "(";
+											string code_type;
+											if( func->getName() == "print") {
+												code_type = "i8* ";
+											}
+											else {
+												code_type = "i32 ";
+											}
+									
+											for (unsigned int i=0; i<$3->getRegVector()->size(); i++) {
+												code+= code_type + (*$3->getRegVector())[i];
+												if (i != $3->getRegVector()->size()-1) {
+													code+= ", ";
+												}
+											}
+											code += ")";
+											Buffer.emit(code);
+										}
+				| ID LPAREN RPAREN
+				                    {
+											if (functions.find($1->getName()) == functions.end())
+											{
+												output::errorUndefFunc(yylineno, $1->getName());
+												exit(1);
+											}
+											Function* func = functions[$1->getName()];
+											if (!func->getArgTypes().empty())
+											{
+												output::errorPrototypeMismatch(yylineno, func->getName(), func->getArgTypes());
+												exit(1);
+											}
+											$$ = (Node*) new Call(func->getRetType());
+											string code = "";
+											string reg = "";
+											if (func->getRetType() != "VOID") {
+												reg = genReg();
+												code = reg + " = " + "call i32 ";
+												$$->setReg(reg);
+											}
+											else {
+												code += "call void ";
+											}
+											code += "@" + func->getName() + "()";
+											Buffer.emit(code);										
+									}
+ExpList:		Exp {
+                        $$ = (Node*) new ExpList();
+                        $$->push_front($1->getType());
+						string reg;
+						if ($1->getType() == "BOOL") {
+							string trueLabel = Buffer.genLabel();
+							int line_num = Buffer.emit("br label @");
+							vector<pair<int,BranchLabelIndex>> trueList = Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST));
+							string falseLabel = Buffer.genLabel();
+							line_num = Buffer.emit("br label @");
+							vector<pair<int,BranchLabelIndex>> falseList = Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST));
+							vector<pair<int,BranchLabelIndex>> brList = Buffer.merge(trueList, falseList);
+							string endLabel = Buffer.genLabel();
+							Buffer.bpatch(brList,endLabel);
+							Buffer.bpatch($1->getTrueList(),trueLabel);
+							Buffer.bpatch($1->getFalseList(),falseLabel);
+							reg = genReg();
+							Buffer.emit(reg + " = phi i32 [1, %" + trueLabel + "], [0, %" + falseLabel + "]");
+	
+							
+						}
+						else {
+							reg = $1->getReg();
+						}
+						
+						$$->setRegVector(new vector<string>());
+						$$->push_front_reg(reg);
+
+                    }
+				| Exp R{
+
+										
+										string reg;
+										if ($1->getType() == "BOOL") {
+											string trueLabel = Buffer.genLabel();
+											int line_num = Buffer.emit("br label @");
+											vector<pair<int,BranchLabelIndex>> trueList = Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST));
+											string falseLabel = Buffer.genLabel();
+											line_num = Buffer.emit("br label @");
+											vector<pair<int,BranchLabelIndex>> falseList = Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST));
+											vector<pair<int,BranchLabelIndex>> brList = Buffer.merge(trueList, falseList);
+											string endLabel = Buffer.genLabel();
+											Buffer.bpatch(brList,endLabel);
+											Buffer.bpatch($1->getTrueList(),trueLabel);
+											Buffer.bpatch($1->getFalseList(),falseLabel);
+											reg = $2->getReg();
+											Buffer.emit(reg + " = phi i32 [1, %" + trueLabel + "], [0, %" + falseLabel + "]");
+											
+											
+										}
+										else {
+											$2->setReg($1->getReg());
+											//reg = $1->getReg();
+										}
+										
+									} 
+					COMMA ExpList {
+									$$ = (Node*) new ExpList($5->getTypes());
+									$$->push_front($1->getType());
+									$$->setRegVector($5->getRegVector());
+									$$->push_front_reg($2->getReg());
+								}
+Type:			INT {
+                        $$ = new Type("INT");
+                    }
+				| BYTE {
+				        $$ = new Type("BYTE");
+				        }
+				| BOOL {
+				        $$ = new Type("BOOL");
+				        }
+Exp:			LPAREN Exp RPAREN {
+                                      $$ = (Node*) new Exp($2->getType(),$2->getReg());
+									  $$->setTrueList($2->getTrueList());
+									  $$->setFalseList($2->getFalseList());
+                                  }
+				| Exp PLUS Exp {
+				                    
+				                    if ( (!$1->isNumerical()) || (!$3->isNumerical())) {
+										output::errorMismatch(yylineno);
+										exit(1);
+									}
+									string reg = genReg();
+									string code(reg);
+									code+= " = add";
+									code+= " i32 ";
+									code+= $1->getReg();
+									code+= ", ";
+									code+= $3->getReg();
+									Buffer.emit(code);
+									if ( ($1->getType() == "BYTE") && ($3->getType() == "BYTE") ) {
+										
+										string truncReg = genReg();
+										code = truncReg;
+										code += "= trunc i32 ";
+										code += reg;
+										code += " to i8";
+										Buffer.emit(code);
+										string newReg = genReg();
+										code = newReg;
+										code+= "= zext i8 ";
+										code+= truncReg;
+										code+= " to i32";
+										Buffer.emit(code);
+										
+										$$ = (Node*) new Exp("BYTE",newReg);
+										
+									}
+									else {
+										
+										$$ = (Node*) new Exp("INT",reg);
+										
+									}
+									
+									
+								}
+				| Exp MINUS Exp {
+				                    
+				                    if ( (!$1->isNumerical()) || (!$3->isNumerical())) {
+										output::errorMismatch(yylineno);
+										exit(1);
+									}
+									string reg = genReg();
+									string code(reg);
+									code+= " = sub";
+									code+= " i32 ";
+									code+= $1->getReg();
+									code+= ", ";
+									code+= $3->getReg();
+									Buffer.emit(code);
+									if ( ($1->getType() == "BYTE") && ($3->getType() == "BYTE") ) {
+										string truncReg = genReg();
+										code = truncReg;
+										code += "= trunc i32 ";
+										code += reg;
+										code += " to i8";
+										Buffer.emit(code);
+										string newReg = genReg();
+										code = newReg;
+										code+= "= zext i8 ";
+										code+= truncReg;
+										code+= " to i32";
+										Buffer.emit(code);
+										
+										$$ = (Node*) new Exp("BYTE",newReg);
+										
+									}
+									else {
+										$$ = (Node*) new Exp("INT",reg);
+										
+									}
+									
+									
+								}								
+				| Exp MULT Exp {
+				                    
+				                    if ( (!$1->isNumerical()) || (!$3->isNumerical())) {
+										output::errorMismatch(yylineno);
+										exit(1);
+									}
+									string reg = genReg();
+									string code(reg);
+									code+= " = mul";
+									code+= " i32 ";
+									code+= $1->getReg();
+									code+= ", ";
+									code+= $3->getReg();
+									Buffer.emit(code);									
+									if ( ($1->getType() == "BYTE") && ($3->getType() == "BYTE") ) {
+										string truncReg = genReg();
+										code = truncReg;
+										code += "= trunc i32 ";
+										code += reg;
+										code += " to i8";
+										Buffer.emit(code);
+										string newReg = genReg();
+										code = newReg;
+										code+= "= zext i8 ";
+										code+= truncReg;
+										code+= " to i32";
+										Buffer.emit(code);
+										
+										$$ = (Node*) new Exp("BYTE",newReg);
+									}
+									else {
+										$$ = (Node*) new Exp("INT",reg);
+									}
+									
+								}
+				| Exp DIVIDE Exp {
+				                    
+				                    if ( (!$1->isNumerical()) || (!$3->isNumerical())) {
+										output::errorMismatch(yylineno);
+										exit(1);
+									}
+									string cmpReg = genReg();
+									string code = cmpReg + " = icmp eq i32 " + $3->getReg() + ", 0";
+									Buffer.emit(code);
+									code = "br i1 " + cmpReg + ", label @, label @";
+									int line_num = Buffer.emit(code);
+									vector<pair<int,BranchLabelIndex>> errorList =  Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST));
+									vector<pair<int,BranchLabelIndex>> goodList =  Buffer.makelist(pair<int,BranchLabelIndex>(line_num,SECOND));
+									string error_label = Buffer.genLabel();
+									string error_string = genReg();
+									code = error_string + " = getelementptr " + "[23 x i8]" + ", " + "[23 x i8]" + "* @." + "error, " + "i32 0, i32 0";
+									Buffer.emit(code);
+									code = "call void @print(i8* " + error_string + ")";
+									Buffer.emit(code);
+									code = "call void @exit(i32 1)";
+									Buffer.emit(code);
+									Buffer.bpatch(errorList, error_label);
+									//line_num = Buffer.emit("br label @");
+									vector<pair<int,BranchLabelIndex>> error_list;// =  Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST));
+									code = "ret ";
+									if ( latest_function == "VOID") {
+										code += "void";
+									}
+									else {
+										code += "i32 0";
+									}
+									Buffer.emit(code);
+									string good_label = Buffer.genLabel();
+									Buffer.bpatch(goodList, good_label);
+									
+									string reg = genReg();
+									code = reg;
+									code+= " = sdiv";
+									code+= " i32 ";
+									code+= $1->getReg();
+									code+= ", ";
+									code+= $3->getReg();
+									Buffer.emit(code);
+									if ( ($1->getType() == "BYTE") && ($3->getType() == "BYTE") ) {
+										string truncReg = genReg();
+										code = truncReg;
+										code += "= trunc i32 ";
+										code += reg;
+										code += " to i8";
+										Buffer.emit(code);
+										string newReg = genReg();
+										code = newReg;
+										code+= "= zext i8 ";
+										code+= truncReg;
+										code+= " to i32";
+										Buffer.emit(code);
+										
+										$$ = (Node*) new Exp("BYTE",newReg);
+									}
+									else {
+										$$ = (Node*) new Exp("INT",reg);
+									}
+									line_num = Buffer.emit("br label @");
+									vector<pair<int,BranchLabelIndex>> good_list =  Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST));
+									vector<pair<int,BranchLabelIndex>> nextList = Buffer.merge(good_list, error_list);
+									string nextLabel = Buffer.genLabel();
+									Buffer.bpatch(nextList, nextLabel);
+									
+								}								
+				| ID {
+						if(!IDDefined(symbol_vector,$1->getName())) {
+							output::errorUndef(yylineno, $1->getName());
+							exit(1);
+						}
+						if(functions.find($1->getName()) != functions.end())
+						{
+                            output::errorUndef(yylineno, $1->getName());
+                            exit(1);
+						}
+                        Symbol* id = findSymbol(symbol_vector,$1->getName());
+						$$ = (Node*) new Exp(id->getType());
+						string reg;
+						if ( id->getOffset() >=0 ) {
+							string pointer = genReg();
+							string code = pointer + " = getelementptr [50 x i32], [50 x i32]* " + sp + ", i32 0, i32 " + to_string(id->getOffset());
+							Buffer.emit(code);
+							reg = genReg();
+							Buffer.emit(reg + " = load i32, i32* " + pointer);
+						}
+						else { 
+							int reg_num = id->getOffset()*(-1) -1;
+							reg = "%" + to_string(reg_num);
+						}
+						
+						
+						if (id->getType() == "BOOL") {
+							string bool_reg = genReg();
+							Buffer.emit(bool_reg + " = trunc i32 " + reg + " to i1");
+							int line_number = Buffer.emit("br i1 " + bool_reg + ", label @, label @");
+							$$->setTrueList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,FIRST)));
+							$$->setFalseList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,SECOND)));
+						}
+						else {
+							$$->setReg(reg);
+						}
+					}
+				| Call {
+				           $$ = (Node*) new Exp($1->getType());
+						   if ($1->getType() != "VOID") {
+								if ($1->getType() != "BOOL") {
+									$$->setReg($1->getReg());
+								}
+								else {
+									string bool_reg = genReg();
+									Buffer.emit(bool_reg + " = trunc i32 " + $1->getReg() + " to i1");
+									int line_number = Buffer.emit("br i1 " + bool_reg + ", label @, label @");
+									$$->setTrueList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,FIRST)));
+									$$->setFalseList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,SECOND)));
+								}
+						   }
+				       }
+				| NUM {			  
+						   // code:
+						   string reg = genReg();
+						   string code(reg);
+						   code += " = add i32 0, ";
+						   code += $1->getSTR();
+						   Buffer.emit(code);
+						   $$ = (Node*) new Exp("INT",reg);
+						   
+				      }
+				| NUM B
+				  {
+				    if($1->getValue() > 255)
+				    {
+				           output::errorByteTooLarge(yylineno,$1->getSTR());
+				           exit(1);
+				    }
+				      
+					// code:
+					string reg = genReg();
+					string code(reg);
+					code += " = zext i8 ";
+					code += $1->getSTR();
+					code+= " to i32";
+					Buffer.emit(code);
+					$$ = (Node*) new Exp("BYTE",reg);
+				  }
+				| STRING
+				  {
+				     
+					  string str = genSTR();
+					  string array = "[";
+					  array += to_string($1->getString().size() -1);
+					  array += " x i8]";
+					  string code = "@.";
+					  code += str;
+					  code += " = internal constant ";
+					  code += array;
+					  code += " c\"";
+					  code += $1->getString().substr(1,$1->getString().size()-2);
+					  code += "\\00\"";
+					  Buffer.emitGlobal(code);
+					  string reg = "%" + str;
+					  $$ = (Node*) new Exp("STRING",reg);
+					  code = reg + " = getelementptr " + array + ", " + array + "* @." + str + ", i32 0, i32 0";
+					  Buffer.emit(code);
+					  
+				  }
+				| TRUE
+				  {
+				      $$ = (Node*) new Exp("BOOL");
+					  int line_number = Buffer.emit("br label @");
+					  $$->setTrueList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,FIRST)));
+					  
+				
+					  
+				  }
+				| FALSE
+				  {
+				      $$ = (Node*) new Exp("BOOL");
+					  int line_number = Buffer.emit("br label @");
+					  $$->setFalseList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,FIRST)));
+				  }
+				| NOT Exp {
+                                if ($2->getType() != "BOOL") {
+                                    output::errorMismatch(yylineno);
+                                    exit(1);
+                                }
+                                $$ = (Node*) new Exp("BOOL");
+								$$->setFalseList($2->getTrueList());
+								$$->setTrueList($2->getFalseList());
+						    }
+				| Exp AND L Exp {
+				                    if ( ($1->getType() != "BOOL") || ($4->getType() != "BOOL"))
+				                    {
+									    output::errorMismatch(yylineno);
+									    exit(1);
+								    }
+									
+									
+				                    $$ = (Node*) new Exp("BOOL");
+									Buffer.bpatch($1->getTrueList(),$3->getLabel());
+									$$->setFalseList(Buffer.merge($1->getFalseList(),$4->getFalseList()));
+									$$->setTrueList($4->getTrueList());
+				               }
+				| Exp OR L Exp {
+				                    if ( ($1->getType() != "BOOL") || ($4->getType() != "BOOL")) {
+									    output::errorMismatch(yylineno);
+									    exit(1);
+								    }
+				                    $$ = (Node*) new Exp("BOOL");
+									Buffer.bpatch($1->getFalseList(),$3->getLabel());
+									$$->setTrueList(Buffer.merge($1->getTrueList(),$4->getTrueList()));
+									$$->setFalseList($4->getFalseList());
+								}
+				| Exp LESS Exp {
+                                    if ( (!$1->isNumerical()) || (!$3->isNumerical())) {
+                                        output::errorMismatch(yylineno);
+                                        exit(1);
+                                    }
+									string reg = genReg();
+									string code = reg;
+									code+= "= icmp slt i32 ";
+									code+= $1->getReg();
+									code+= ", ";
+									code+= $3->getReg();
+									Buffer.emit(code);
+				                    $$ = (Node*) new Exp("BOOL",reg);
+									code = " br i1 ";
+									code+= reg;
+									code+= ", label @, label @";
+									int line_number = Buffer.emit(code);
+									$$->setTrueList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,FIRST)));
+									$$->setFalseList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,SECOND)));
+								}
+				| Exp GREATER Exp {
+                                    if ( (!$1->isNumerical()) || (!$3->isNumerical())) {
+                                        output::errorMismatch(yylineno);
+                                        exit(1);
+                                    }
+									string reg = genReg();
+									string code = reg;
+									code+= "= icmp sgt i32 ";
+									code+= $1->getReg();
+									code+= ", ";
+									code+= $3->getReg();
+									Buffer.emit(code);
+				                    $$ = (Node*) new Exp("BOOL",reg);
+									code = " br i1 ";
+									code+= reg;
+									code+= ", label @, label @";
+									int line_number = Buffer.emit(code);
+									$$->setTrueList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,FIRST)));
+									$$->setFalseList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,SECOND)));
+								}								
+				| Exp LESSEQ Exp {
+                                    if ( (!$1->isNumerical()) || (!$3->isNumerical())) {
+                                        output::errorMismatch(yylineno);
+                                        exit(1);
+                                    }
+									string reg = genReg();
+									string code = reg;
+									code+= "= icmp sle i32 ";
+									code+= $1->getReg();
+									code+= ", ";
+									code+= $3->getReg();
+									Buffer.emit(code);
+				                    $$ = (Node*) new Exp("BOOL",reg);
+									code = " br i1 ";
+									code+= reg;
+									code+= ", label @, label @";
+									int line_number = Buffer.emit(code);
+									$$->setTrueList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,FIRST)));
+									$$->setFalseList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,SECOND)));
+								}						
+				| Exp GREATEREQ Exp {
+                                    if ( (!$1->isNumerical()) || (!$3->isNumerical())) {
+                                        output::errorMismatch(yylineno);
+                                        exit(1);
+                                    }
+									string reg = genReg();
+									string code = reg;
+									code+= "= icmp sge i32 ";
+									code+= $1->getReg();
+									code+= ", ";
+									code+= $3->getReg();
+									Buffer.emit(code);
+				                    $$ = (Node*) new Exp("BOOL",reg);
+									code = " br i1 ";
+									code+= reg;
+									code+= ", label @, label @";
+									int line_number = Buffer.emit(code);
+									$$->setTrueList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,FIRST)));
+									$$->setFalseList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,SECOND)));
+								}								
+				| Exp EQUAL Exp {
+				                    if ( (!$1->isNumerical()) || (!$3->isNumerical()))
+                                    {
+                                        output::errorMismatch(yylineno);
+                                        exit(1);
+                                    }
+									string reg = genReg();
+									string code = reg;
+									code+= "= icmp eq i32 ";
+									code+= $1->getReg();
+									code+= ", ";
+									code+= $3->getReg();
+									Buffer.emit(code);
+				                    $$ = (Node*) new Exp("BOOL",reg);
+									code = " br i1 ";
+									code+= reg;
+									code+= ", label @, label @";
+									int line_number = Buffer.emit(code);
+									$$->setTrueList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,FIRST)));
+									$$->setFalseList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,SECOND)));
+				                    
+				                }
+				| Exp NEQUAL Exp {
+				                    if ( (!$1->isNumerical()) || (!$3->isNumerical()))
+                                    {
+                                        output::errorMismatch(yylineno);
+                                        exit(1);
+                                    }
+									string reg = genReg();
+									string code = reg;
+									code+= "= icmp ne i32 ";
+									code+= $1->getReg();
+									code+= ", ";
+									code+= $3->getReg();
+									Buffer.emit(code);
+				                    $$ = (Node*) new Exp("BOOL",reg);
+									code = " br i1 ";
+									code+= reg;
+									code+= ", label @, label @";
+									int line_number = Buffer.emit(code);
+									$$->setTrueList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,FIRST)));
+									$$->setFalseList(Buffer.makelist(pair<int,BranchLabelIndex>(line_number,SECOND)));
+				                    
+				                }								
+IfExp:          Exp
+                {
+                      if($1->getType() != "BOOL")
+                      {
+                           output::errorMismatch(yylineno);
+                           exit(1);
+                      }
+					  $$ = (Node*) new IfExp();
+					  $$->setTrueList($1->getTrueList());
+					  $$->setFalseList($1->getFalseList());
+
+                }
+CaseList:		CaseDecl CaseList 
+					{
+						$$ = (Node *) new CaseList($2->getNextList(), $2->getValueStack(), $2->getLabelStack(), $2->getDefaultLabel(),$2->getDefaultFlag());
+						$$->getValueStack().push($1->getValue());
+						$$->getLabelStack().push($1->getLabel());
+						if ($2->getDefaultFlag() && $2->getLabelStack().empty() ) {
+							Buffer.bpatch($1->getNextList(),  $2->getDefaultLabel());
+						}
+						else {
+							Buffer.bpatch($1->getNextList(), $2->getLabelStack().top());
+						}
+						$$->setNextList($2->getNextList());
+						$$->setBreakList(Buffer.merge($1->getBreakList(), $2->getBreakList()));
+						$$->setConList(Buffer.merge($1->getConList(), $2->getConList()));
+					}
+				| CaseDecl 
+					{
+						stack<int>* values = new stack<int>();
+						values->push($1->getValue());
+						stack<string>* labels = new stack<string>();
+						labels->push($1->getLabel());
+						string defaultLabel = "";
+						bool defaultFlag = false;
+						$$ = (Node *) new CaseList($1->getNextList(), *values, *labels ,defaultLabel, defaultFlag);
+						$$->setBreakList($1->getBreakList());
+						$$->setConList($1->getConList());
+					}
+				| DEFAULT COLON L Statements 
+					{
+						stack<int>* values = new stack<int>();
+						stack<string>* labels = new stack<string>();
+						string defaultLabel = $3->getLabel();
+						bool defaultFlag = true;
+						$$ = (Node *) new CaseList($4->getNextList(), *values, *labels, defaultLabel, defaultFlag);
+						$$->setBreakList($4->getBreakList());
+						$$->setConList($4->getConList());
+					}
+CaseDecl:		CASE NUM COLON L Statements 
+					{
+						$$ = (Node *) new CaseDecl($5->getNextList(), $2->getValue(), $4->getLabel());
+						$$->setBreakList($5->getBreakList());
+						$$->setConList($5->getConList());
+						
+						
+					}
+OPEN_SCOPE: 	/*epsilon*/ 
+					{
+					    map<string,Symbol*>* new_symbol_table = new map<string,Symbol*>();
+					    symbol_vector.push_back(new_symbol_table);
+						vector<Symbol*>* new_symbol_scope = new vector<Symbol*>;
+						symbol_stack.push(new_symbol_scope);
+					    offset_stack.push(offset_stack.top());
+					}
+CLOSE_SCOPE:   /*epsilon*/
+                    {
+						/* hw3 printing:
+						output::endScope();
+						for (unsigned int i=0; i<symbol_stack.top()->size();i++) {
+		                    output::printID((*symbol_stack.top())[i]->getName(),(*symbol_stack.top())[i]->getOffset(),(*symbol_stack.top())[i]->getType());
+						}
+						*/
+                        symbol_vector.pop_back();
+                        offset_stack.pop();
+						symbol_stack.pop();
+
+                    }
+
+L:				/*epsilon*/
+					{
+						$$ = (Node *) new L(Buffer.genLabel());
+					}
+					
+N:				/*epsilon*/
+					{
+						int line_num = Buffer.emit("br label @");						
+						$$ = (Node *) new N();
+						$$->setNextList(Buffer.makelist(pair<int,BranchLabelIndex>(line_num,FIRST)));
+					}
+					
+R:				/*epsilon*/
+					{
+						$$ = (Node *) new R(genReg());
+					}
+%%
+
+
+
+void yyerror(const char*) {
+	output::errorSyn(yylineno);
+	exit(1);
+}
+
+
+
+int main() {
+	Buffer.emitGlobal("declare i32 @printf(i8*, ...)");
+	Buffer.emitGlobal("declare void @exit(i32)");
+	Buffer.emitGlobal("@.int_specifier = constant [4 x i8] c\"%d\\0A\\00\"");
+	Buffer.emitGlobal("@.str_specifier = constant [4 x i8] c\"%s\\0A\\00\"");
+	Buffer.emitGlobal("define void @printi(i32) {");
+	Buffer.emitGlobal("\t%spec_ptr = getelementptr [4 x i8], [4 x i8]* @.int_specifier, i32 0, i32 0");
+	Buffer.emitGlobal("\tcall i32 (i8*, ...) @printf(i8* %spec_ptr, i32 %0)");
+	Buffer.emitGlobal("\tret void");
+	Buffer.emitGlobal("}\n");
+	Buffer.emitGlobal("define void @print(i8*) {");
+	Buffer.emitGlobal("\t%spec_ptr = getelementptr [4 x i8], [4 x i8]* @.str_specifier, i32 0, i32 0");
+	Buffer.emitGlobal("\tcall i32 (i8*, ...) @printf(i8* %spec_ptr, i8* %0)");
+	Buffer.emitGlobal("\tret void");
+	Buffer.emitGlobal("}\n");
+	string code = "@.error = internal constant [23 x i8] c\"Error division by zero\\00\"";
+	Buffer.emitGlobal(code);
+
+    vector<string>* temp_v1 = new vector<string>;
+    (*temp_v1).push_back("STRING");
+    vector<string>* temp_v2 = new vector<string>;
+    (*temp_v2).push_back("INT");
+    map<string,Symbol*>* first_symbol_table = new map<string,Symbol*>();
+	string print_type = output::makeFunctionType("VOID",*temp_v1);
+	string printi_type = output::makeFunctionType("VOID",*temp_v2);
+	Symbol* print_symbol = new Symbol("print",print_type,FUNCTION_OFFSET);
+	Symbol* printi_symbol = new Symbol("printi",printi_type,FUNCTION_OFFSET);
+    string temp_str1 = "print";
+    string temp_str2 = "printi";
+	(*first_symbol_table)[temp_str1] = print_symbol;
+	(*first_symbol_table)[temp_str2] = printi_symbol;
+	symbol_stack.push(new vector<Symbol*>());
+	symbol_stack.top()->push_back(print_symbol);
+	symbol_stack.top()->push_back(printi_symbol);
+	symbol_vector.push_back(first_symbol_table);
+	offset_stack.push(0);
+	functions[temp_str1] = new Function("print","VOID",*temp_v1);
+	functions[temp_str2] = new Function("printi","VOID",*temp_v2);
+
+	int result = yyparse();
+	if(functions.find("main") == functions.end())
+    {
+        output::errorMainMissing();
+        exit(1);
+    }
+	if ( (functions["main"]->getRetType() != "VOID") || (functions["main"]->getArgTypes().size() != 0) )
+	{
+        output::errorMainMissing();
+        exit(1);
+    }
+	/* hw3 printing
+	output::endScope();
+	for (unsigned int i=0; i<symbol_stack.top()->size();i++) {
+		output::printID((*symbol_stack.top())[i]->getName(),(*symbol_stack.top())[i]->getOffset(),(*symbol_stack.top())[i]->getType());
+	}
+	*/
+	Buffer.printGlobalBuffer();
+	Buffer.printCodeBuffer();
+	return result;
+
+}
+
